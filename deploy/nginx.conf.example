@@ -1,0 +1,61 @@
+# nginx 예 (/etc/nginx/conf.d/jangseung.conf 등) : example.org -> 장승 (127.0.0.1:8330)
+# nginx example : example.org -> Jangseung (127.0.0.1:8330). Replace example.org and the certificate paths.
+#
+# 공개 화면은 로그인 없음. "내부" 화면 (/internal/) 은 auth_request 로 로그인을 확인한 요청에만 비밀 헤더를 붙임.
+# 내부 화면을 쓰지 않으면 location ^~ /internal/ 블록과 jangseung.conf 의 [internal] 은 빼도 됨.
+
+limit_req_zone  $binary_remote_addr zone=jangseung:10m rate=5r/s;
+limit_conn_zone $binary_remote_addr zone=jangseung_conn:10m;
+
+server {
+  listen 80;
+  listen [::]:80;
+  server_name example.org;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  server_name example.org;
+  ssl_certificate     /etc/ssl/example.org/fullchain.pem;
+  ssl_certificate_key /etc/ssl/example.org/privkey.pem;
+
+  gzip on;
+  gzip_types text/css application/json;
+  add_header X-Content-Type-Options nosniff always;
+  add_header Referrer-Policy same-origin always;
+
+  # --- 내부 화면 (선택) ----------------------------------------------------------
+  # /_auth 는 로그인 확인용 내부 주소 (직접 구현 / 기존 SSO). 200 = 로그인됨, 401 = 아님.
+  # 로그인됨 -> 비밀 헤더를 붙여 장승으로. 장승은 헤더 값이 [internal] key_file 과 같을 때만 /internal/ 에 답함.
+  #   location = /_auth { internal; proxy_pass http://127.0.0.1:9000/check; ... }
+  #   /etc/nginx/snippets/jangseung_key.conf 한 줄 (권한 600) :
+  #     proxy_set_header X-Jangseung-Key "<key_file 과 같은 값>";
+  location ^~ /internal/ {
+    auth_request /_auth;
+    error_page 401 = @login;          # 로그인 화면으로 보내는 곳 (직접 정의)
+    include snippets/jangseung_key.conf;
+    proxy_pass http://127.0.0.1:8330;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+  }
+
+  # 사내 전용 ([web] require_login = yes) 으로 쓰려면 아래 location / 안에서 :
+  #   auth_request /_auth;  error_page 401 = @login;  include snippets/jangseung_key.conf;
+  #   (그리고 X-Jangseung-Key 를 비우는 proxy_set_header 줄은 지움). 로그인 안 된 요청은 장승까지 오지 않음.
+  location / {
+    limit_req  zone=jangseung burst=20 nodelay;
+    limit_req_status 429;
+    limit_conn jangseung_conn 20;
+    proxy_pass http://127.0.0.1:8330;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Jangseung-Key "";   # 바깥에서 온 같은 이름의 헤더는 지움 (위조 방지)
+    proxy_read_timeout 30s;
+  }
+
+  # 아래 경로 (예 /rpki/) 에 둘 때 :
+  #   location ^~ /rpki/ { proxy_pass http://127.0.0.1:8330/; proxy_set_header X-Forwarded-Prefix /rpki; ... }
+  #   (jangseung.conf 의 base_path = auto, trust_proxy 에 nginx 주소)
+}
